@@ -6,16 +6,14 @@ import json
 import uuid
 import logging
 import urllib.request
-import urllib.parse
 import subprocess
 import time
-import binascii
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-server_address = os.getenv("SERVER_ADDRESS", "127.0.0.1")
-client_id = str(uuid.uuid4())
+SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "127.0.0.1")
+CLIENT_ID = str(uuid.uuid4())
 
 # ------------------------
 # Helpers
@@ -39,32 +37,40 @@ def download(url, path):
     return path
 
 def queue_prompt(prompt):
-    url = f"http://{server_address}:8188/prompt"
-    body = json.dumps({"prompt": prompt, "client_id": client_id}).encode()
+    url = f"http://{SERVER_ADDRESS}:8188/prompt"
+    body = json.dumps({
+        "prompt": prompt,
+        "client_id": CLIENT_ID
+    }).encode("utf-8")
+
     req = urllib.request.Request(url, body)
     return json.loads(urllib.request.urlopen(req).read())
 
-def get_history(pid):
-    url = f"http://{server_address}:8188/history/{pid}"
+def get_history(prompt_id):
+    url = f"http://{SERVER_ADDRESS}:8188/history/{prompt_id}"
     return json.loads(urllib.request.urlopen(url).read())
 
 def wait_for_video(ws, prompt):
-    pid = queue_prompt(prompt)["prompt_id"]
+    prompt_id = queue_prompt(prompt)["prompt_id"]
 
+    # Wait until ComfyUI finishes execution
     while True:
         msg = ws.recv()
         if isinstance(msg, str):
             data = json.loads(msg)
-            if data["type"] == "executing":
-                if data["data"]["node"] is None and data["data"]["prompt_id"] == pid:
-                    break
+            if (
+                data.get("type") == "executing"
+                and data["data"]["node"] is None
+                and data["data"]["prompt_id"] == prompt_id
+            ):
+                break
 
-    history = get_history(pid)[pid]
-    for node in history["outputs"].values():
-        if "gifs" in node:
-            video = node["gifs"][0]["fullpath"]
-            with open(video, "rb") as f:
-                return base64.b64encode(f.read()).decode()
+    history = get_history(prompt_id)[prompt_id]
+
+    # Find saved MP4 path
+    for node in history.get("outputs", {}).values():
+        if "gifs" in node and node["gifs"]:
+            return node["gifs"][0]["fullpath"]
 
     return None
 
@@ -74,35 +80,33 @@ def wait_for_video(ws, prompt):
 
 def handler(job):
     inp = job.get("input", {})
-    task = f"/tmp/{uuid.uuid4()}"
-    os.makedirs(task, exist_ok=True)
+    task_dir = f"/tmp/{uuid.uuid4()}"
+    os.makedirs(task_dir, exist_ok=True)
 
-    # ---------- image ----------
+    # -------- image input --------
     if "image_base64" in inp:
-        image = save_base64(inp["image_base64"], f"{task}/input.jpg")
+        image_path = save_base64(inp["image_base64"], f"{task_dir}/input.jpg")
     elif "image_url" in inp:
-        image = download(inp["image_url"], f"{task}/input.jpg")
+        image_path = download(inp["image_url"], f"{task_dir}/input.jpg")
     elif "image_path" in inp:
-        image = inp["image_path"]
+        image_path = inp["image_path"]
     else:
-        image = "/example_image.png"
+        return {"error": "No input image provided"}
 
-    end_image = None
+    end_image_path = None
     if "end_image_base64" in inp:
-        end_image = save_base64(inp["end_image_base64"], f"{task}/end.jpg")
+        end_image_path = save_base64(inp["end_image_base64"], f"{task_dir}/end.jpg")
     elif "end_image_url" in inp:
-        end_image = download(inp["end_image_url"], f"{task}/end.jpg")
+        end_image_path = download(inp["end_image_url"], f"{task_dir}/end.jpg")
     elif "end_image_path" in inp:
-        end_image = inp["end_image_path"]
+        end_image_path = inp["end_image_path"]
 
-    # ---------- engine selection ----------
+    # -------- workflow selection --------
     engine = inp.get("engine", "fp8")
 
     if engine == "gguf":
         workflow_path = "/new_Wan22_gguf_api.json"
-    elif engine == "flf2v":
-        workflow_path = "/new_Wan22_flf2v_api.json"
-    elif end_image:
+    elif engine == "flf2v" or end_image_path:
         workflow_path = "/new_Wan22_flf2v_api.json"
     else:
         workflow_path = "/new_Wan22_api.json"
@@ -111,18 +115,17 @@ def handler(job):
 
     prompt = load_json(workflow_path)
 
-    # ---------- params ----------
+    # -------- parameters --------
     width  = to_16(inp.get("width", 480))
     height = to_16(inp.get("height", 832))
     length = inp.get("length", 81)
-    steps  = inp.get("steps", 10)
     seed   = inp.get("seed", 42)
     cfg    = inp.get("cfg", 2.0)
 
-    # ---------- inject ----------
-    prompt["244"]["inputs"]["image"] = image
+    # -------- inject into workflow --------
+    prompt["244"]["inputs"]["image"] = image_path
     prompt["541"]["inputs"]["num_frames"] = length
-    prompt["135"]["inputs"]["positive_prompt"] = inp["prompt"]
+    prompt["135"]["inputs"]["positive_prompt"] = inp.get("prompt", "")
     prompt["135"]["inputs"]["negative_prompt"] = inp.get("negative_prompt", "")
     prompt["220"]["inputs"]["seed"] = seed
     prompt["540"]["inputs"]["seed"] = seed
@@ -132,28 +135,31 @@ def handler(job):
     prompt["498"]["inputs"]["context_frames"] = length
     prompt["498"]["inputs"]["context_overlap"] = inp.get("context_overlap", 48)
 
-    if end_image and "617" in prompt:
-        prompt["617"]["inputs"]["image"] = end_image
+    if end_image_path and "617" in prompt:
+        prompt["617"]["inputs"]["image"] = end_image_path
 
-    # ---------- run ----------
-    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
+    # -------- run ComfyUI --------
+    ws_url = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
     ws = websocket.WebSocket()
 
     for _ in range(60):
         try:
             ws.connect(ws_url)
             break
-        except:
+        except Exception:
             time.sleep(1)
 
-    video_b64 = wait_for_video(ws, prompt)
+    video_path = wait_for_video(ws, prompt)
     ws.close()
 
-    if not video_b64:
-        return {"error": "Video not found"}
+    if not video_path or not os.path.exists(video_path):
+        return {"error": "Video not generated"}
 
+    # ✅ SERVERLESS-SAFE OUTPUT
     return {
-        "video": f"data:video/mp4;base64,{video_b64}"
+        "video_path": video_path
     }
 
-runpod.serverless.start({"handler": handler})
+runpod.serverless.start({
+    "handler": handler
+})
