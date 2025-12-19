@@ -8,6 +8,7 @@ import logging
 import urllib.request
 import subprocess
 import time
+import shutil
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,7 +54,6 @@ def get_history(prompt_id):
 def wait_for_video(ws, prompt):
     prompt_id = queue_prompt(prompt)["prompt_id"]
 
-    # Wait until ComfyUI finishes execution
     while True:
         msg = ws.recv()
         if isinstance(msg, str):
@@ -67,7 +67,6 @@ def wait_for_video(ws, prompt):
 
     history = get_history(prompt_id)[prompt_id]
 
-    # Find saved MP4 path
     for node in history.get("outputs", {}).values():
         if "gifs" in node and node["gifs"]:
             return node["gifs"][0]["fullpath"]
@@ -122,7 +121,7 @@ def handler(job):
     seed   = inp.get("seed", 42)
     cfg    = inp.get("cfg", 2.0)
 
-    # -------- inject into workflow --------
+    # -------- inject --------
     prompt["244"]["inputs"]["image"] = image_path
     prompt["541"]["inputs"]["num_frames"] = length
     prompt["135"]["inputs"]["positive_prompt"] = inp.get("prompt", "")
@@ -155,9 +154,15 @@ def handler(job):
     if not video_path or not os.path.exists(video_path):
         return {"error": "Video not generated"}
 
-    # ✅ SERVERLESS-SAFE OUTPUT
+    # -------- SERVERLESS OUTPUT (THIS IS THE IMPORTANT PART) --------
+    output_dir = "/runpod-volume/output"
+    os.makedirs(output_dir, exist_ok=True)
+
+    final_path = f"{output_dir}/wan22_{int(time.time())}.mp4"
+    shutil.copy2(video_path, final_path)
+
     return {
-        "video_path": video_path
+        "file_path": final_path
     }
 
 runpod.serverless.start({
