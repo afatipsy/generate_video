@@ -30,6 +30,12 @@ RUN cd /ComfyUI/custom_nodes && \
     git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite && \
     cd ComfyUI-VideoHelperSuite && \
     pip install -r requirements.txt
+
+    # RIFE Frame Interpolation (required for RIFE VFI node)
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation && \
+    cd ComfyUI-Frame-Interpolation && \
+    pip install -r requirements.txt
     
 RUN cd /ComfyUI/custom_nodes && \
     git clone https://github.com/kael558/ComfyUI-GGUF-FantasyTalking && \
