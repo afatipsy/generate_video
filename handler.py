@@ -43,7 +43,6 @@ def queue_prompt(prompt):
         "prompt": prompt,
         "client_id": CLIENT_ID
     }).encode("utf-8")
-
     req = urllib.request.Request(url, body)
     return json.loads(urllib.request.urlopen(req).read())
 
@@ -82,7 +81,7 @@ def handler(job):
     task_dir = f"/tmp/{uuid.uuid4()}"
     os.makedirs(task_dir, exist_ok=True)
 
-    # -------- image input --------
+    # ---- image input ----
     if "image_base64" in inp:
         image_path = save_base64(inp["image_base64"], f"{task_dir}/input.jpg")
     elif "image_url" in inp:
@@ -92,61 +91,26 @@ def handler(job):
     else:
         return {"error": "No input image provided"}
 
-    end_image_path = None
-    if "end_image_base64" in inp:
-        end_image_path = save_base64(inp["end_image_base64"], f"{task_dir}/end.jpg")
-    elif "end_image_url" in inp:
-        end_image_path = download(inp["end_image_url"], f"{task_dir}/end.jpg")
-    elif "end_image_path" in inp:
-        end_image_path = inp["end_image_path"]
-
-    # -------- workflow selection --------
+    # ---- workflow ----
     engine = inp.get("engine", "fp8")
-
-    if engine == "gguf":
-        workflow_path = "/new_Wan22_gguf_api.json"
-    elif engine == "flf2v" or end_image_path:
-        workflow_path = "/new_Wan22_flf2v_api.json"
-    else:
-        workflow_path = "/new_Wan22_api.json"
-
-    logger.info(f"Using workflow: {workflow_path}")
+    workflow_path = (
+        "/new_Wan22_gguf_api.json" if engine == "gguf"
+        else "/new_Wan22_api.json"
+    )
 
     prompt = load_json(workflow_path)
 
-    # -------- parameters --------
-    width  = to_16(inp.get("width", 480))
-    height = to_16(inp.get("height", 832))
-    length = inp.get("length", 81)
-    seed   = inp.get("seed", 42)
-    cfg    = inp.get("cfg", 2.0)
-
-    # -------- inject --------
+    # ---- params ----
     prompt["244"]["inputs"]["image"] = image_path
-    prompt["541"]["inputs"]["num_frames"] = length
+    prompt["541"]["inputs"]["num_frames"] = inp.get("length", 81)
     prompt["135"]["inputs"]["positive_prompt"] = inp.get("prompt", "")
     prompt["135"]["inputs"]["negative_prompt"] = inp.get("negative_prompt", "")
-    prompt["220"]["inputs"]["seed"] = seed
-    prompt["540"]["inputs"]["seed"] = seed
-    prompt["540"]["inputs"]["cfg"] = cfg
-    prompt["235"]["inputs"]["value"] = width
-    prompt["236"]["inputs"]["value"] = height
-    prompt["498"]["inputs"]["context_frames"] = length
-    prompt["498"]["inputs"]["context_overlap"] = inp.get("context_overlap", 48)
+    prompt["235"]["inputs"]["value"] = to_16(inp.get("width", 640))
+    prompt["236"]["inputs"]["value"] = to_16(inp.get("height", 360))
 
-    if end_image_path and "617" in prompt:
-        prompt["617"]["inputs"]["image"] = end_image_path
-
-    # -------- run ComfyUI --------
-    ws_url = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
+    # ---- run ComfyUI ----
     ws = websocket.WebSocket()
-
-    for _ in range(60):
-        try:
-            ws.connect(ws_url)
-            break
-        except Exception:
-            time.sleep(1)
+    ws.connect(f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}")
 
     video_path = wait_for_video(ws, prompt)
     ws.close()
@@ -154,7 +118,7 @@ def handler(job):
     if not video_path or not os.path.exists(video_path):
         return {"error": "Video not generated"}
 
-    # -------- SERVERLESS OUTPUT (THIS IS THE IMPORTANT PART) --------
+    # ---- COPY TO NETWORK VOLUME (S3) ----
     output_dir = "/runpod-volume/output"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -162,9 +126,7 @@ def handler(job):
     shutil.copy2(video_path, final_path)
 
     return {
-        "file_path": final_path
+        "video_path": final_path
     }
 
-runpod.serverless.start({
-    "handler": handler
-})
+runpod.serverless.start({"handler": handler})
